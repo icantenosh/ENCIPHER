@@ -94,10 +94,3 @@ The output is:
 encipher.exe
 ```
 
-## GitHub Release Note
-
-The bundled `encipher.exe` is large because it includes FFmpeg and FFprobe. It is too large for a normal GitHub commit, so upload it under **Releases** instead of committing it directly.
-
-## FFmpeg Notice
-
-Encipher can bundle FFmpeg/FFprobe for convenience. FFmpeg is a separate project with its own license terms. If you publish binaries, review the license of the FFmpeg build you bundle.
