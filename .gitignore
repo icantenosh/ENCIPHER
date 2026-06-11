@@ -8,3 +8,4 @@ tmp-*/
 # The bundled executable is too large for normal GitHub commits.
 # Upload release builds as GitHub Release assets instead.
 encipher.exe
+encipher-gui.exe

@@ -1,9 +1,6 @@
 ﻿$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $CliArgs = @($args)
-$ToolRoot = if ($env:ENCIPHER_HOME) { $env:ENCIPHER_HOME } else { $PSScriptRoot }
-$FfmpegPath = if ($env:ENCIPHER_FFMPEG) { $env:ENCIPHER_FFMPEG } else { "ffmpeg" }
-$FfprobePath = if ($env:ENCIPHER_FFPROBE) { $env:ENCIPHER_FFPROBE } else { "ffprobe" }
 
 $InputDir = ""
 $OutputDir = ""
@@ -17,7 +14,7 @@ $X265Params = ""
 $VideoBitrate = ""
 $Maxrate = ""
 $Bufsize = ""
-$VideoProfile = ""
+$Profile = ""
 $PixFmt = ""
 $Scale = ""
 $Fps = ""
@@ -44,14 +41,17 @@ $ResumeSubtitleArgLine = ""
 $ResumeFilterLine = ""
 $CompletedRelativePaths = New-Object "System.Collections.Generic.HashSet[string]" ([System.StringComparer]::OrdinalIgnoreCase)
 $InteractiveMode = $false
+$EncipherHome = if ($env:ENCIPHER_HOME) { [System.IO.Path]::GetFullPath($env:ENCIPHER_HOME) } else { $PSScriptRoot }
+$EncipherFfmpeg = if ($env:ENCIPHER_FFMPEG -and (Test-Path -LiteralPath $env:ENCIPHER_FFMPEG)) { $env:ENCIPHER_FFMPEG } else { "ffmpeg" }
+$EncipherFfprobe = if ($env:ENCIPHER_FFPROBE -and (Test-Path -LiteralPath $env:ENCIPHER_FFPROBE)) { $env:ENCIPHER_FFPROBE } else { "ffprobe" }
 
 function Show-Help {
     @"
 encipher - recursively transcode videos to HEVC video and AAC audio
 
 Usage:
-  encipher.exe
-  encipher.exe -InputDir "D:\Videos" -OutputDir "D:\Encoded" [options]
+  encipher.bat
+  encipher.bat -InputDir "D:\Videos" -OutputDir "D:\Encoded" [options]
 
 Input:
   -InputDir DIR              Source directory to scan recursively.
@@ -205,11 +205,11 @@ function Get-TotalOutputBytes([string]$path) {
 }
 
 function Get-TotalRuntimeSeconds([object[]]$items) {
-    if (-not (Get-Command $script:FfprobePath -ErrorAction SilentlyContinue)) { return 0.0 }
+    if (-not (Get-Command $EncipherFfprobe -ErrorAction SilentlyContinue)) { return 0.0 }
     $total = 0.0
     foreach ($item in $items) {
         try {
-            $duration = & $script:FfprobePath -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 $item.FullName
+            $duration = & $EncipherFfprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 $item.FullName
             if ($duration) {
                 $total += [double]::Parse($duration, [System.Globalization.CultureInfo]::InvariantCulture)
             }
@@ -227,12 +227,16 @@ function Get-EstimateProfile([string]$encoderName, [string]$presetName) {
         "x265" {
             $reduction = 48.0
             switch ($presetName) {
-                "fast" { $speed = 0.85 }
-                "medium" { $speed = 0.55 }
-                "slow" { $speed = 0.35 }
-                "slower" { $speed = 0.22 }
-                "veryslow" { $speed = 0.14 }
-                default { $speed = 0.45 }
+                "ultrafast" { $speed = 1.20 }
+                "superfast" { $speed = 1.00 }
+                "veryfast" { $speed = 0.85 }
+                "faster" { $speed = 0.65 }
+                "fast" { $speed = 0.42 }
+                "medium" { $speed = 0.28 }
+                "slow" { $speed = 0.13 }
+                "slower" { $speed = 0.08 }
+                "veryslow" { $speed = 0.05 }
+                default { $speed = 0.28 }
             }
         }
         "nvenc" {
@@ -251,135 +255,6 @@ function Get-EstimateProfile([string]$encoderName, [string]$presetName) {
     }
 }
 
-function Get-HistoryMatches([string]$historyPath, [string]$encoderName, [string]$presetName, [string]$filterLine) {
-    if (-not (Test-Path -LiteralPath $historyPath)) { return @() }
-    try {
-        return @(Import-Csv -LiteralPath $historyPath | Where-Object {
-            $_.Encoder -eq $encoderName -and
-            $_.Preset -eq $presetName -and
-            $_.Filters -eq $filterLine -and
-            [double]$_.Speed -gt 0
-        } | Select-Object -Last 10)
-    } catch {
-        return @()
-    }
-}
-
-function Get-AverageSpeed([object[]]$rows) {
-    if (-not $rows -or $rows.Count -eq 0) { return 0.0 }
-    $total = 0.0
-    $count = 0
-    foreach ($row in $rows) {
-        try {
-            $speed = [double]::Parse($row.Speed, [System.Globalization.CultureInfo]::InvariantCulture)
-            if ($speed -gt 0) {
-                $total += $speed
-                $count++
-            }
-        } catch {
-        }
-    }
-    if ($count -eq 0) { return 0.0 }
-    return $total / $count
-}
-
-function Add-StatsHistoryRow([string]$historyPath, [hashtable]$data) {
-    $dir = Split-Path -Parent $historyPath
-    if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-
-    $row = [pscustomobject]@{
-        Timestamp = (Get-Date).ToString("s")
-        Type = $data.Type
-        Encoder = $data.Encoder
-        Preset = $data.Preset
-        Filters = $data.Filters
-        Speed = $data.Speed
-        RuntimeSeconds = $data.RuntimeSeconds
-        ElapsedSeconds = $data.ElapsedSeconds
-        SourceBytes = $data.SourceBytes
-        OutputBytes = $data.OutputBytes
-        Reduction = $data.Reduction
-        Files = $data.Files
-        SessionLog = $data.SessionLog
-    }
-
-    if (Test-Path -LiteralPath $historyPath) {
-        $row | Export-Csv -LiteralPath $historyPath -NoTypeInformation -Append
-    } else {
-        $row | Export-Csv -LiteralPath $historyPath -NoTypeInformation
-    }
-}
-
-function Invoke-BenchmarkSample([object]$sampleFile, [System.Collections.ArrayList]$filters, [System.Collections.ArrayList]$videoArgs, [string]$encoderName) {
-    $duration = 0.0
-    if (Get-Command $script:FfprobePath -ErrorAction SilentlyContinue) {
-        try {
-            $rawDuration = & $script:FfprobePath -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 $sampleFile.FullName
-            if ($rawDuration) {
-                $duration = [double]::Parse($rawDuration, [System.Globalization.CultureInfo]::InvariantCulture)
-            }
-        } catch {
-        }
-    }
-
-    $sampleSeconds = 30.0
-    if ($duration -gt 0) {
-        $sampleSeconds = [Math]::Min(30.0, [Math]::Max(5.0, $duration * 0.10))
-    }
-
-    $benchArgs = New-Object System.Collections.ArrayList
-    $benchArgs.AddRange(@("-hide_banner", "-loglevel", "error", "-stats", "-i", $sampleFile.FullName, "-t", $sampleSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture), "-map", "0:v:0"))
-    if ($filters.Count -gt 0) {
-        $benchArgs.AddRange(@("-vf", ($filters -join ",")))
-    }
-    $benchArgs.AddRange($videoArgs)
-    $benchArgs.AddRange(@("-an", "-sn", "-f", "null", "NUL"))
-
-    Write-Host ""
-    Write-Host "Running benchmark sample..."
-    Write-Host "Sample: $($sampleFile.Name)"
-    Write-Host "Length: $(Format-Duration $sampleSeconds)"
-
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    $exitCode = Invoke-FfmpegWithQuit @($benchArgs)
-    $timer.Stop()
-
-    if ($LastFfmpegCancelled) {
-        Write-Host "Benchmark cancelled."
-        return @{
-            Success = $false
-            Cancelled = $true
-            Speed = 0.0
-            SampleSeconds = $sampleSeconds
-            ElapsedSeconds = $timer.Elapsed.TotalSeconds
-            ExitCode = $exitCode
-        }
-    }
-
-    if ($exitCode -ne 0 -or $timer.Elapsed.TotalSeconds -le 0) {
-        Write-Host "Benchmark failed; using history/default estimate."
-        return @{
-            Success = $false
-            Cancelled = $false
-            Speed = 0.0
-            SampleSeconds = $sampleSeconds
-            ElapsedSeconds = $timer.Elapsed.TotalSeconds
-            ExitCode = $exitCode
-        }
-    }
-
-    $speed = $sampleSeconds / $timer.Elapsed.TotalSeconds
-    Write-Host ("Benchmark speed: {0:N2}x realtime" -f $speed)
-    return @{
-        Success = $true
-        Cancelled = $false
-        Speed = $speed
-        SampleSeconds = $sampleSeconds
-        ElapsedSeconds = $timer.Elapsed.TotalSeconds
-        ExitCode = $exitCode
-    }
-}
-
 function Write-StatsPanel([string]$title, [hashtable]$stats, [string]$logPath) {
     $lines = @(
         ""
@@ -394,7 +269,6 @@ function Write-StatsPanel([string]$title, [hashtable]$stats, [string]$logPath) {
         ("Estimated Saved    : {0}" -f $stats.EstimatedSaved)
         ("Estimated Reduction: {0}" -f $stats.EstimatedReduction)
         ("Estimated Time     : {0}" -f $stats.EstimatedTime)
-        ("Prediction Source  : {0}" -f $stats.PredictionSource)
     )
 
     foreach ($line in $lines) { Write-Host $line }
@@ -468,11 +342,38 @@ function ConvertTo-CommandLineArg([string]$value) {
     return '"' + $escaped + '"'
 }
 
-function Invoke-FfmpegWithQuit([object[]]$ffmpegArgs) {
+function Get-FfmpegProgressValues([string]$progressPath) {
+    $values = @{}
+    if (-not $progressPath -or -not (Test-Path -LiteralPath $progressPath)) { return $values }
+
+    try {
+        $stream = [System.IO.File]::Open($progressPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $reader = New-Object System.IO.StreamReader($stream)
+            $text = $reader.ReadToEnd()
+        } finally {
+            $stream.Dispose()
+        }
+
+        foreach ($line in ($text -split "\r?\n")) {
+            $idx = $line.IndexOf("=")
+            if ($idx -gt 0) {
+                $name = $line.Substring(0, $idx)
+                $value = $line.Substring($idx + 1)
+                $values[$name] = $value
+            }
+        }
+    } catch {
+    }
+
+    return $values
+}
+
+function Invoke-FfmpegWithQuit([object[]]$ffmpegArgs, [string]$progressPath = "", [string]$logPath = "") {
     $script:LastFfmpegCancelled = $false
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $script:FfmpegPath
+    $startInfo.FileName = $EncipherFfmpeg
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $false
@@ -483,6 +384,8 @@ function Invoke-FfmpegWithQuit([object[]]$ffmpegArgs) {
     $process.StartInfo = $startInfo
 
     [void]$process.Start()
+    $progressTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastProgressLine = ""
 
     while (-not $process.HasExited) {
         try {
@@ -498,10 +401,40 @@ function Invoke-FfmpegWithQuit([object[]]$ffmpegArgs) {
         } catch {
             # Some hosted terminals do not expose KeyAvailable. Ctrl+C still stops the process.
         }
+
+        if ($progressPath -and $logPath -and $progressTimer.ElapsedMilliseconds -ge 1000) {
+            $progressTimer.Restart()
+            $progress = Get-FfmpegProgressValues $progressPath
+            if ($progress.Count -gt 0 -and $progress.frame) {
+                $frame = $progress.frame
+                $fps = if ($progress.fps) { $progress.fps } else { "0" }
+                $speed = if ($progress.speed) { $progress.speed } else { "0x" }
+                $outTime = if ($progress.out_time) { $progress.out_time } else { "" }
+                $progressLine = "PROGRESS : frame=$frame fps=$fps speed=$speed time=$outTime"
+                if ($progressLine -ne $lastProgressLine) {
+                    Add-Content -LiteralPath $logPath -Value $progressLine
+                    $lastProgressLine = $progressLine
+                }
+            }
+        }
+
         Start-Sleep -Milliseconds 100
     }
 
     $process.WaitForExit()
+    if ($progressPath -and $logPath) {
+        $progress = Get-FfmpegProgressValues $progressPath
+        if ($progress.Count -gt 0 -and $progress.frame) {
+            $frame = $progress.frame
+            $fps = if ($progress.fps) { $progress.fps } else { "0" }
+            $speed = if ($progress.speed) { $progress.speed } else { "0x" }
+            $outTime = if ($progress.out_time) { $progress.out_time } else { "" }
+            $progressLine = "PROGRESS : frame=$frame fps=$fps speed=$speed time=$outTime"
+            if ($progressLine -ne $lastProgressLine) {
+                Add-Content -LiteralPath $logPath -Value $progressLine
+            }
+        }
+    }
     return $process.ExitCode
 }
 
@@ -555,7 +488,7 @@ for ($idx = 0; $idx -lt $CliArgs.Count; $idx++) {
         "videobitrate" { $VideoBitrate = Get-OptionValue $CliArgs $idx $option; $idx++ }
         "maxrate" { $Maxrate = Get-OptionValue $CliArgs $idx $option; $idx++ }
         "bufsize" { $Bufsize = Get-OptionValue $CliArgs $idx $option; $idx++ }
-        "profile" { $VideoProfile = Get-OptionValue $CliArgs $idx $option; $idx++ }
+        "profile" { $Profile = Get-OptionValue $CliArgs $idx $option; $idx++ }
         "pix-fmt" { $PixFmt = Get-OptionValue $CliArgs $idx $option; $idx++ }
         "pixfmt" { $PixFmt = Get-OptionValue $CliArgs $idx $option; $idx++ }
         "scale" { $Scale = Get-OptionValue $CliArgs $idx $option; $idx++ }
@@ -615,7 +548,7 @@ if ($InteractiveMode) {
     Write-Host "Recursive HEVC + AAC Converter"
     Write-Host ""
 
-    $interactiveLogRoot = Join-Path $ToolRoot "logs"
+    $interactiveLogRoot = Join-Path $EncipherHome "logs"
     $availableLogs = @(Get-ChildItem -LiteralPath $interactiveLogRoot -Filter "*.txt" -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "enc_*.txt" -or $_.Name -like "encode_session_*.txt" } |
         Sort-Object LastWriteTime -Descending)
@@ -742,10 +675,10 @@ if ($InteractiveMode -and -not $ResumeMode) {
     if (-not $bitDepth) { $bitDepth = "2" }
     if ($bitDepth -eq "1") {
         $PixFmt = "yuv420p"
-        $VideoProfile = "main"
+        $Profile = "main"
     } elseif ($bitDepth -eq "2") {
         $PixFmt = "yuv420p10le"
-        $VideoProfile = "main10"
+        $Profile = "main10"
     } else {
         Write-Error "Invalid bit-depth selection."
         exit 2
@@ -805,8 +738,8 @@ if ($InteractiveMode -and -not $ResumeMode) {
     Write-Host "512k = very high 5.1"
     Write-Host "640k = max common AAC 5.1"
     Write-Host ""
-    $audioRate = Read-EncipherInput "Enter AAC bitrate, or press Enter for 320k"
-    if ($audioRate) { $AudioBitrate = $audioRate } else { $AudioBitrate = "320k" }
+    $audioRate = Read-EncipherInput "Enter AAC bitrate, or press Enter for 384k"
+    if ($audioRate) { $AudioBitrate = $audioRate } else { $AudioBitrate = "384k" }
 
     Show-Section "ENCODER SELECTION"
     Write-Host "1 = AMD GPU HEVC AMF"
@@ -830,20 +763,24 @@ if ($InteractiveMode -and -not $ResumeMode) {
 
     if ($Encoder -eq "x265") {
         Show-Section "CPU x265 PRESET"
-        Write-Host "1 = fast      - faster encode, larger files"
-        Write-Host "2 = medium    - default x265 balance"
-        Write-Host "3 = slow      - smaller files, recommended"
-        Write-Host "4 = slower    - even smaller, very slow"
-        Write-Host "5 = veryslow  - smallest, extremely slow"
+        Write-Host "1 = very fast - much faster CPU encode, larger files"
+        Write-Host "2 = faster    - faster CPU encode, larger files"
+        Write-Host "3 = fast      - recommended CPU balance for 4K"
+        Write-Host "4 = medium    - better compression, slower"
+        Write-Host "5 = slow      - smaller files, very slow"
+        Write-Host "6 = slower    - extremely slow"
+        Write-Host "7 = veryslow  - smallest, impractically slow for 4K"
         Write-Host ""
-        $presetChoice = Read-EncipherInput "Choose CPU preset, or press Enter for slow"
+        $presetChoice = Read-EncipherInput "Choose CPU preset, or press Enter for fast"
         if (-not $presetChoice) { $presetChoice = "3" }
         switch ($presetChoice) {
-            "1" { $Preset = "fast" }
-            "2" { $Preset = "medium" }
-            "3" { $Preset = "slow" }
-            "4" { $Preset = "slower" }
-            "5" { $Preset = "veryslow" }
+            "1" { $Preset = "veryfast" }
+            "2" { $Preset = "faster" }
+            "3" { $Preset = "fast" }
+            "4" { $Preset = "medium" }
+            "5" { $Preset = "slow" }
+            "6" { $Preset = "slower" }
+            "7" { $Preset = "veryslow" }
             default {
                 Write-Error "Invalid CPU preset."
                 exit 2
@@ -934,8 +871,8 @@ if (-not $InputDir) {
     exit 2
 }
 
-if (-not (Get-Command $FfmpegPath -ErrorAction SilentlyContinue)) {
-    Write-Error "ffmpeg was not found. Install ffmpeg, add it to PATH, or use the bundled encipher.exe build."
+if (-not (Get-Command $EncipherFfmpeg -ErrorAction SilentlyContinue)) {
+    Write-Error "ffmpeg was not found in PATH. Install ffmpeg or add ffmpeg.exe to PATH, then try again."
     exit 1
 }
 
@@ -952,9 +889,8 @@ if ($inputPath.TrimEnd("\") -ieq $outputPath.TrimEnd("\")) {
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 
-$logRoot = Join-Path $ToolRoot "logs"
+$logRoot = Join-Path $EncipherHome "logs"
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
-$statsHistoryLog = Join-Path $logRoot "stats_history.csv"
 $sessionLog = $ResumeLog
 if (-not $ResumeMode) {
     $sessionStamp = Get-Date -Format "yyMMdd_HHmmss"
@@ -1001,7 +937,7 @@ if ($ResumeMode) {
     Add-OptionalArg $videoArgs "-b:v" $VideoBitrate
     Add-OptionalArg $videoArgs "-maxrate" $Maxrate
     Add-OptionalArg $videoArgs "-bufsize" $Bufsize
-    Add-OptionalArg $videoArgs "-profile:v" $VideoProfile
+    Add-OptionalArg $videoArgs "-profile:v" $Profile
     Add-OptionalArg $videoArgs "-pix_fmt" $PixFmt
 
     if ($AudioNone) {
@@ -1036,54 +972,35 @@ $files = Get-ChildItem -LiteralPath $inputPath -Recurse -File |
 Write-Host "Scanning `"$inputPath`"..."
 if ($files.Count -eq 0) {
     Write-Host "No supported video files found."
+    @(
+        "=========================================="
+        "ENCIPHER ENCODE SESSION LOG"
+        "=========================================="
+        "Session Started : $(Get-Date)"
+        "Source Root     : $inputPath"
+        "Output Root     : $outputPath"
+        "Files Found     : 0"
+        "Encoder         : $Encoder"
+        "Video Args      : $($videoArgs -join ' ')"
+        "Audio Args      : $($audioArgs -join ' ')"
+        "Subtitle Args   : $($subtitleArgs -join ' ')"
+        "Filters         : $($filterParts -join ',')"
+        ""
+        "No supported video files found."
+        "Supported Extensions: $($extensions -join ', ')"
+    ) | Set-Content -LiteralPath $sessionLog
+    Write-Host "Session log: $sessionLog"
     exit 0
 }
 
 $sourceBytes = Get-TotalInputBytes $files
 $runtimeSeconds = Get-TotalRuntimeSeconds $files
 $estimateProfile = Get-EstimateProfile $Encoder $Preset
-$filterLine = $filterParts -join ","
-$predictionSpeed = [double]$estimateProfile.Speed
-$predictionSource = "Defaults ({0:N2}x)" -f $predictionSpeed
-$historyMatches = Get-HistoryMatches $statsHistoryLog $Encoder $Preset $filterLine
-$historySpeed = Get-AverageSpeed $historyMatches
-
-if ($historySpeed -gt 0) {
-    $predictionSpeed = $historySpeed
-    $predictionSource = "History ({0:N2}x from {1} run(s))" -f $predictionSpeed, $historyMatches.Count
-}
-
-if (-not $ResumeMode -and $files.Count -gt 0) {
-    $benchmarkResult = Invoke-BenchmarkSample $files[0] $filterParts $videoArgs $Encoder
-    if ($benchmarkResult.Cancelled) {
-        Write-Host "Session log: $sessionLog"
-        exit 130
-    }
-    if ($benchmarkResult.Success -and [double]$benchmarkResult.Speed -gt 0) {
-        $predictionSpeed = [double]$benchmarkResult.Speed
-        $predictionSource = "Live benchmark ({0:N2}x)" -f $predictionSpeed
-        Add-StatsHistoryRow $statsHistoryLog @{
-            Type = "benchmark"
-            Encoder = $Encoder
-            Preset = $Preset
-            Filters = $filterLine
-            Speed = $predictionSpeed.ToString("0.####", [System.Globalization.CultureInfo]::InvariantCulture)
-            RuntimeSeconds = ([double]$benchmarkResult.SampleSeconds).ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-            ElapsedSeconds = ([double]$benchmarkResult.ElapsedSeconds).ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-            SourceBytes = $sourceBytes
-            OutputBytes = ""
-            Reduction = ""
-            Files = $files.Count
-            SessionLog = $sessionLog
-        }
-    }
-}
-
 $estimatedOutputBytes = $sourceBytes * ((100.0 - [double]$estimateProfile.Reduction) / 100.0)
 $estimatedSavedBytes = $sourceBytes - $estimatedOutputBytes
 $estimatedEncodeSeconds = 0.0
-if ($runtimeSeconds -gt 0 -and $predictionSpeed -gt 0) {
-    $estimatedEncodeSeconds = $runtimeSeconds / $predictionSpeed
+if ($runtimeSeconds -gt 0 -and [double]$estimateProfile.Speed -gt 0) {
+    $estimatedEncodeSeconds = $runtimeSeconds / [double]$estimateProfile.Speed
 }
 
 $estimateStats = @{
@@ -1095,7 +1012,6 @@ $estimateStats = @{
     EstimatedSaved = Format-ByteSize $estimatedSavedBytes
     EstimatedReduction = ("{0:N0}%" -f [double]$estimateProfile.Reduction)
     EstimatedTime = Format-Duration $estimatedEncodeSeconds
-    PredictionSource = $predictionSource
 }
 
 Write-Host "Found $($files.Count) video file(s)."
@@ -1162,9 +1078,11 @@ foreach ($file in $files) {
     }
 
     Write-Host "[$current/$($files.Count)] `"$relative`" -> `"$targetRelative`""
+    Add-Content -LiteralPath $sessionLog -Value "STARTED : [$current/$($files.Count)] $relative -> $targetRelative"
 
+    $progressPath = Join-Path ([System.IO.Path]::GetTempPath()) ("encipher_progress_{0}.txt" -f ([System.Guid]::NewGuid().ToString("N")))
     $ffmpegArgs = New-Object System.Collections.ArrayList
-    $ffmpegArgs.AddRange(@($overwriteArg, "-hide_banner", "-loglevel", "error", "-stats", "-i", $file.FullName, "-map", "0"))
+    $ffmpegArgs.AddRange(@($overwriteArg, "-hide_banner", "-loglevel", "error", "-stats", "-progress", $progressPath, "-i", $file.FullName, "-map", "0"))
     if ($filterParts.Count -gt 0) {
         $ffmpegArgs.AddRange(@("-vf", ($filterParts -join ",")))
     }
@@ -1173,7 +1091,11 @@ foreach ($file in $files) {
     $ffmpegArgs.AddRange($subtitleArgs)
     [void]$ffmpegArgs.Add($target)
 
-    $ffmpegExitCode = Invoke-FfmpegWithQuit @($ffmpegArgs)
+    $ffmpegExitCode = Invoke-FfmpegWithQuit -ffmpegArgs @($ffmpegArgs) -progressPath $progressPath -logPath $sessionLog
+    try {
+        if (Test-Path -LiteralPath $progressPath) { Remove-Item -LiteralPath $progressPath -Force }
+    } catch {
+    }
     if ($ffmpegExitCode -eq 0 -and -not $LastFfmpegCancelled) {
         $done++
         Add-Content -LiteralPath $sessionLog -Value "SUCCESS : $relative -> $targetRelative"
@@ -1211,31 +1133,6 @@ $finalStats = @{
     Reduction = $reductionText
 }
 
-$actualSpeed = 0.0
-if ($runtimeSeconds -gt 0 -and $runStopwatch.Elapsed.TotalSeconds -gt 0) {
-    $actualSpeed = $runtimeSeconds / $runStopwatch.Elapsed.TotalSeconds
-}
-
-$actualReduction = ""
-if ($sourceBytes -gt 0) {
-    $actualReduction = ((($sourceBytes - $outputBytes) / $sourceBytes) * 100.0).ToString("0.####", [System.Globalization.CultureInfo]::InvariantCulture)
-}
-
-Add-StatsHistoryRow $statsHistoryLog @{
-    Type = "final"
-    Encoder = $Encoder
-    Preset = $Preset
-    Filters = $filterLine
-    Speed = $actualSpeed.ToString("0.####", [System.Globalization.CultureInfo]::InvariantCulture)
-    RuntimeSeconds = $runtimeSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-    ElapsedSeconds = $runStopwatch.Elapsed.TotalSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-    SourceBytes = $sourceBytes
-    OutputBytes = $outputBytes
-    Reduction = $actualReduction
-    Files = $files.Count
-    SessionLog = $sessionLog
-}
-
 Write-Host ""
 Write-Host "Done. Encoded: $done  Skipped: $skipped  Failed: $failed  Total: $($files.Count)"
 Add-Content -LiteralPath $sessionLog -Value ""
@@ -1244,4 +1141,3 @@ Write-FinalStatsPanel $finalStats $sessionLog
 Write-Host "Session log: $sessionLog"
 if ($failed -gt 0) { exit 1 }
 exit 0
-

@@ -11,11 +11,19 @@ It targets:
 - resumable session logs
 - benchmark-backed time estimates
 
-## Download
+## Install
 
-For normal use, download `encipher.exe` from the GitHub Releases page.
+For the easiest GUI install on Windows, open PowerShell and run:
 
-The release executable is self-contained and bundles:
+```powershell
+iwr https://raw.githubusercontent.com/icantenosh/ENCIPHER/main/install-gui.ps1 -UseB | iex
+```
+
+That installs `encipher-gui.exe` for your Windows user and creates Start Menu and Desktop shortcuts.
+
+You can also download `encipher.exe` or `encipher-gui.exe` from the GitHub Releases page and run them directly.
+
+The release executables are self-contained and bundle:
 
 - `encipher.ps1`
 - `ffmpeg.exe`
@@ -29,6 +37,12 @@ Run interactive mode:
 
 ```bat
 encipher.exe
+```
+
+Run the standalone GUI:
+
+```bat
+encipher-gui.exe
 ```
 
 Encode a folder:
@@ -88,9 +102,15 @@ Then run:
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-The output is:
+To build the standalone GUI, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-gui.ps1
+```
+
+The outputs are:
 
 ```text
 encipher.exe
+encipher-gui.exe
 ```
-
